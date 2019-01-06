@@ -1,0 +1,172 @@
+#!/bin/bash
+set -e
+
+# This script is magic. It will grab your screen in all number of ways.
+
+# Options
+VIDEO_PIDFILE="$HOME/.local/screencap.pid"
+VIDEO_LOGFILE="$HOME/.local/screencap.log"
+
+# Codecs
+FFMPEG_CODECS=/tmp/ffmpeg-codecs
+ffmpeg -codecs 2> /dev/null > $FFMPEG_CODECS
+
+# Video
+CAPTURE_VIDEO=false
+
+# Capture Current Window
+CAPTURE_WINDOW=false
+
+CAPTURE_AREA=false
+
+FRAMERATE=30
+SCREEN="0"
+
+while getopts "vwar:s:" opt; do
+    case $opt in
+        "v")
+            CAPTURE_VIDEO=true
+            ;;
+        "w")
+            CAPTURE_WINDOW=true
+            ;;
+        "a")
+            CAPTURE_AREA=true
+            ;;
+        "r")
+            FRAMERATE=$OPTARG
+            ;;
+        "s")
+            SCREEN=$OPTARG
+            ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+if [ $1.x != .x ]; then
+    NAME=$1
+fi
+
+# One thread per core
+THREADS=$(grep "core id" /proc/cpuinfo | sort -u | wc -l)
+
+# Codecs
+encoders () {
+    awk "/encoders:/ && \$2 ~ /$1/ {print \$0}" $FFMPEG_CODECS | sed 's/^.*(encoders:\([^)]*\)).*$/\1/'
+}
+codecExists () {
+    exists=1
+    encs=($(encoders $1))
+
+    for enc in ${encs[@]}; do
+        if [ $2 == $enc ]; then
+            exists=0
+        fi
+    done
+	-f (matroska) -map 0:0 (video)
+	-f (matroska) -map 0:0 (video)
+	-f (matroska) -map 0:0 (video)
+
+    return $exists
+}
+RESOLUTION=$(xdpyinfo | sed -n "/screen #$SCREEN/,/^$/p" | awk '/dimensions:/ {print $2}')
+POSITION="0,0"
+
+VQUALITY=16
+if codecExists "h264" "libx264"; then
+    VCODEC="libx264"
+    VOPTIONS="-preset:v fast -crf $VQUALITY" #add video 
+elif codecExists "vp9" "libvpx-vp9"; then
+    VCODEC="libvpx-vp9"
+    VOPTIONS="-deadline realtime -crf $VQUALITY" #add video 
+elif codecExists "vp8" "libvpx"; then
+    VCODEC="libvpx"
+    VOPTIONS="-deadline realtime -crf $VQUALITY" #add video 
+else
+    VCODEC="NONE"
+fi 
+
+if codecExists "aac" "libvo_aacenc"; then
+    ACODEC="libvo_aacenc"
+    ARATE="256k"
+elif codecExists "aac" "aac"; then
+    ACODEC="aac"
+    ARATE="256k"
+elif codecExists "ac3" "ac3"; then
+    ACODEC="libmp3lame"
+    ARATE="256k"
+elif codecExists "mp3" "libmp3lame"; then
+    ACODEC="libmp3lame"
+    ARATE="320k"
+else
+    ACODEC="NONE"
+fi 
+
+# Audio Devices
+AUDIO_OUTPUT=$(pactl list sinks | grep -A1 RUNNING | awk '/Name:/ {print $2}').monitor
+AUDIO_RECORD="default"
+
+if [ $AUDIO_OUTPUT != .monitor ]; then
+    OUTDEVICE="-f pulse -i $AUDIO_OUTPUT"
+    OUTCHANNEL="-map 2:0 -c:a $ACODEC -b:a $ARATE"
+fi
+
+# Default Name
+if [ $NAME.x = .x ]; then
+if [ $CAPTURE_VIDEO = true ]; then
+    NAME="$HOME/Videos/Screenshot/`hostname`.`date +%Y-%m-%dT%H%M.%S`.mkv"
+else
+    NAME="$HOME/Pictures/Screenshot/`hostname`.`date +%Y-%m-%dT%H%M.%S`.png"
+fi
+fi
+
+#make the directory
+mkdir -p $(dirname $NAME)
+
+set +e
+if [ $CAPTURE_VIDEO = true ] && [ -f "$VIDEO_PIDFILE" ] && pkill -P $(cat "$VIDEO_PIDFILE"); then
+    set -e
+    NAME=$(head -1 "$VIDEO_LOGFILE")
+    notify-send -u low "Screen Capture" "Saved as $(basename "$NAME")"
+    rm "$VIDEO_PIDFILE" "$VIDEO_LOGFILE"
+elif [ $CAPTURE_VIDEO = true ] && [ $VCODEC != "NONE" ] && [ $ACODEC != "NONE" ]; then
+    set -e
+    if [ $CAPTURE_WINDOW = true ]; then
+        windowID=$(xprop -root | awk '/_NET_ACTIVE_WINDOW\(WINDOW\):/ {print $5}')
+        width=$(xwininfo -id $windowID | awk '/Width:/ {print $2}')
+        height=$(xwininfo -id $windowID | awk '/Height:/ {print $2}')
+        RESOLUTION="${width}x${height}"
+        xpos=$(xwininfo -id $windowID | awk '/Absolute upper-left X:/ {print $4}')
+        ypos=$(xwininfo -id $windowID | awk '/Absolute upper-left Y:/ {print $4}')
+        POSITION="${xpos},${ypos}"
+    fi
+
+    
+    ffcommand="ffmpeg -hide_banner -threads $THREADS -y\
+        $PRE_OPTIONS -f x11grab -draw_mouse 1 -framerate $FRAMERATE -show_region 1\
+         -video_size $RESOLUTION -i $DISPLAY.$SCREEN+$POSITION\
+         -f pulse -i $AUDIO_RECORD $OUTDEVICE 
+         -f matroska -map 0:0 -c:v $VCODEC $VOPTIONS -r $FRAMERATE\
+         -map 1:0 -c:a $ACODEC -b:a $ARATE $OUTCHANNEL $NAME"
+
+    echo $ffcommand
+
+    set +e
+    echo $$ > $VIDEO_PIDFILE
+    $ffcommand 2>&1 | awk -vRS="\r" '$1 ~ /frame/ {print;fflush()}' | while read status; do
+        echo $NAME > "$VIDEO_LOGFILE"
+        echo $status >> "$VIDEO_LOGFILE"
+    done
+    cat $VIDEO_PIDFILE
+    set -e
+elif [ $CAPTURE_WINDOW = true ]; then
+    gnome-screenshot -w -B -f "$NAME"
+    notify-send -u low "Screenshot" "Saved as $(basename "$NAME")"
+elif [ $CAPTURE_AREA = true ]; then
+    gnome-screenshot -a -B -f "$NAME"
+    notify-send -u low "Screenshot" "Saved as $(basename "$NAME")"
+else
+    gnome-screenshot -B -f "$NAME"
+    notify-send -u low "Screenshot" "Saved as $(basename "$NAME")"
+fi 
